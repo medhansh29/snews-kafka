@@ -72,7 +72,88 @@ Both legacy and SNEWS2 support test/real distinction:
 
 SNEWS2 uses **JSON messages** over hopskotch-flavored Kafka (via [snews_pt](https://github.com/SNEWS2/SNEWS_Publishing_Tools)), with 5 distinct message tiers:
 
-### Message Tiers
+### How Tier Messaging Works
+
+Unlike legacy SNEWS (a single 160-byte binary packet), SNEWS2 splits alerts into **5 specialized tiers**, each serving a different purpose in the supernova detection workflow.
+
+#### 1. Heartbeat — "I'm alive"
+
+The simplest tier. Detectors periodically send heartbeats to confirm they're online and operational. If heartbeats stop arriving, the network knows something is wrong.
+
+```json
+{ "tier": "Heartbeat", "detector_name": "Super-K", "detector_status": "ON" }
+```
+
+#### 2. CoincidenceTier — "Multiple detectors saw something!"
+
+The **core alert**. When two or more detectors independently detect a neutrino burst within a narrow time window, the SNEWS server generates a coincidence alert.
+
+Key field: **`p_val`** — the statistical probability that this coincidence is a false alarm. Lower = more likely a real supernova.
+
+```json
+{
+  "tier": "CoincidenceTier",
+  "detector_name": "Super-K",
+  "neutrino_time_utc": "2025-01-15T14:30:00.123456+00:00",
+  "p_val": 0.07,
+  "is_test": true
+}
+```
+
+#### 3. SignificanceTier — "Here's how significant it is"
+
+Provides **statistical significance over time bins**. Instead of a single p-value, it sends an array of `p_values[]` — each representing the false-alarm probability in successive time windows of width `t_bin_width_sec`. This lets scientists see whether the signal is growing stronger (real supernova) or fading (noise).
+
+#### 4. TimingTier — "Exactly when the neutrinos arrived"
+
+The most data-rich tier. Contains **precise arrival times of individual neutrinos** as nanosecond offsets from a reference `start_time_utc`. Critical for:
+
+- **Triangulating the supernova's sky position** (comparing arrival times across detectors at different locations on Earth)
+- **Studying neutrino physics** (oscillation, mass ordering)
+
+Supports two modes:
+
+- **Unbinned**: Raw nanosecond offsets (`[0, 303000, 659236, ...]`)
+- **Binned**: Histogram counts with a `time_bin_width_ns`
+
+#### 5. Retraction — "Never mind, false alarm"
+
+Allows a detector to **withdraw** a previous message — either by UUID (`retract_message_uuid`) or by count (`retract_latest_n`). Includes an optional `retraction_reason`.
+
+### Detection Flow
+
+A typical supernova detection sequence:
+
+```
+Time ──────────────────────────────────────────────────────▶
+
+Detector A: Heartbeat ── Heartbeat ── [burst!] ── TimingTier
+Detector B: Heartbeat ── Heartbeat ── [burst!] ── TimingTier
+                                          │
+                                          ▼
+                                 CoincidenceTier (server-generated)
+                                          │
+                                          ▼
+                                 SignificanceTier (p-values over time)
+                                          │
+                                 (if false alarm)
+                                          ▼
+                                    Retraction
+```
+
+### Common Fields
+
+Every tier shares a base set of fields:
+
+| Field                      | Purpose                                         |
+| -------------------------- | ----------------------------------------------- |
+| `uuid`                     | Unique message ID                               |
+| `detector_name`            | Which detector sent it                          |
+| `is_test` / `is_firedrill` | Flags to prevent accidental real alerts         |
+| `machine_time_utc`         | When the detector's clock generated the message |
+| `schema_version`           | For forward compatibility (`"0.2"` currently)   |
+
+### Tier Summary
 
 | Tier                 | Key Fields                                               | Purpose                        |
 | -------------------- | -------------------------------------------------------- | ------------------------------ |
@@ -81,21 +162,6 @@ SNEWS2 uses **JSON messages** over hopskotch-flavored Kafka (via [snews_pt](http
 | **CoincidenceTier**  | `neutrino_time_utc`, `p_val`                             | Multi-detector coincidence     |
 | **SignificanceTier** | `p_values[]`, `t_bin_width_sec`                          | Statistical burst significance |
 | **TimingTier**       | `neutrino_time_utc`, `timing_series[]`, `start_time_utc` | Precise arrival timing         |
-
-**Common fields** (all tiers): `uuid`, `tier`, `detector_name`, `sent_time_utc`, `machine_time_utc`, `is_pre_sn`, `is_test`, `is_firedrill`, `meta`, `schema_version`
-
-### SNEWS2 Sample Message (CoincidenceTier)
-
-```json
-{
-  "tier": "CoincidenceTier",
-  "detector_name": "Super-K",
-  "neutrino_time_utc": "2025-01-15T14:30:00.123456+00:00",
-  "p_val": 0.07,
-  "is_test": true,
-  "schema_version": "0.2"
-}
-```
 
 ### Publishing SNEWS2 Alerts
 
