@@ -10,9 +10,12 @@ This pipeline supports two SNEWS generations:
 Legacy SNEWS:
   160-byte binary ──▶ Transformer ──▶ GCN Unified JSON ──▶ Kafka (snews-alerts)
 
-SNEWS 2.0:
-  JSON (5 tiers) ──▶ Validation ──▶ Kafka (snews2-alerts)
+SNEWS 2.0 (via Hopskotch):
+  SCiMMA Hopskotch ──▶ snews_pt Listener ──▶ GCN Unified Schema ──▶ Kafka (snews2-gcn-alerts)
 ```
+
+> [!NOTE]
+> Currently, we lack publishing credentials for NASA GCN. Therefore, the final step—publishing to GCN—is mocked by sending the unified JSON schema to a local Docker Kafka topic (`snews2-gcn-alerts`).
 
 ---
 
@@ -163,17 +166,47 @@ Every tier shares a base set of fields:
 | **SignificanceTier** | `p_values[]`, `t_bin_width_sec`                          | Statistical burst significance |
 | **TimingTier**       | `neutrino_time_utc`, `timing_series[]`, `start_time_utc` | Precise arrival timing         |
 
-### Publishing SNEWS2 Alerts
+### Unified GCN Schema for SNEWS 2.0
+
+Because GCN expects a unified format rather than 5 distinct tier types, the pipeline automatically wraps received Hopskotch messages into a standard `SNEWS2GCNNotice` envelope. This is the schema that will be ultimately published to NASA GCN:
+
+```json
+{
+  "schema_version": "1.0",
+  "gcn_notice_type": "SNEWS2_ALERT",
+  "is_test": true,
+  "is_firedrill": true,
+  "snews2_tier": "CoincidenceTier",
+  "snews2_message_uuid": "...",
+  "detector_name": "Super-K",
+  "event_time_utc": "2025-01-15T14:30:00.123456+00:00",
+  "tier_data": {
+    "p_val": 0.07
+  }
+}
+```
+
+_Note: Tier-specific fields (like `p_val`, `timing_series`, or `detector_status`) are dynamically nested inside the `tier_data` object._
+
+### Listening to SNEWS2 Alerts (Hopskotch)
+
+This is the primary ingestion method for SNEWS2. We use `snews_pt` to listen to SCiMMA and route it through our GCN transformer.
+
+```bash
+# Subscribe to the test/firedrill network and mock publish to local Kafka
+python -m src.cli snews2-hopskotch-listen --firedrill
+
+# Subscribe to the LIVE production network (requires Hopskotch credentials in ~/.config/hop/auth.toml)
+python -m src.cli snews2-hopskotch-listen --no-firedrill
+```
+
+### Producing Mock SNEWS2 Alerts (Local Testing)
+
+If you wish to bypass Hopskotch entirely for local testing, you can produce mock SNEWS2 alerts directly into Kafka:
 
 ```bash
 # Send a sample coincidence alert (test)
 python -m src.cli snews2-produce --tier coincidence --test
-
-# Send a timing tier alert
-python -m src.cli snews2-produce --tier timing --test
-
-# Other tiers: heartbeat, significance, retraction
-python -m src.cli snews2-produce --tier heartbeat
 ```
 
 ### Subscribing to SNEWS2 Alerts
@@ -186,11 +219,8 @@ python -m src.cli snews2-consume
 python -m src.cli snews2-consume --count 5
 ```
 
-<!-- TODO: Document subscribing to live SNEWS2 alerts via hopskotch/SCiMMA
-     when production hop credentials are available. The snews_pt Subscriber
-     class (snews_pt.snews_sub.Subscriber) connects to hop broker topics
-     and saves alerts as JSON files. Our local implementation mirrors this
-     pattern using plain Kafka consumers. -->
+<!-- Note: The hopskotch listener acts as the primary subscriber to SNEWS announcements.
+     The `snews2-consume` command is just an internal viewer to verify messages made it into the local Kafka mock. -->
 
 ### Preview SNEWS2 JSON (No Kafka)
 
@@ -273,13 +303,21 @@ event_time = TJD_EPOCH + timedelta(days=tjd) + timedelta(seconds=sod)
 pip install -r requirements.txt
 ```
 
-### 2. Start Kafka
+### 2. Setup Hopskotch Authentication (For SNEWS2 Live Data)
+
+```bash
+hop auth add
+```
+
+_(Provide your SCiMMA Username, Password, and `kafka.scimma.org` as the hostname)._
+
+### 3. Start Local Kafka (GCN Mock)
 
 ```bash
 docker compose up -d
 ```
 
-### 3. Test the Pipeline
+### 4. Test the Pipeline
 
 ```bash
 # Legacy SNEWS
@@ -287,9 +325,8 @@ python -m src.cli transform --sample
 python -m src.cli produce --sample --test
 python -m src.cli consume --count 1
 
-# SNEWS2
-python -m src.cli snews2-transform --tier coincidence
-python -m src.cli snews2-produce --tier coincidence --test
+# SNEWS2 (Listen -> Mock GCN)
+python -m src.cli snews2-hopskotch-listen --firedrill
 python -m src.cli snews2-consume --count 1
 ```
 
@@ -305,11 +342,11 @@ python -m src.cli consume --count 5        # Consume N messages
 python -m src.cli transform --sample       # Preview JSON output
 
 # SNEWS2
-python -m src.cli snews2-produce --tier coincidence --test
-python -m src.cli snews2-produce --tier timing
-python -m src.cli snews2-consume                           # Subscribe forever
-python -m src.cli snews2-consume --count 5                 # Consume N messages
-python -m src.cli snews2-transform --tier significance     # Preview JSON
+python -m src.cli snews2-hopskotch-listen --firedrill      # Listen to Hopskotch & publish to GCN mock
+python -m src.cli snews2-hopskotch-listen --no-firedrill   # Listen to LIVE Hopskotch
+python -m src.cli snews2-produce --tier coincidence --test # Local testing mock producer
+python -m src.cli snews2-consume                           # View messages arriving in GCN mock
+python -m src.cli snews2-transform --tier significance     # Preview SNEWS2 generated JSON
 ```
 
 ---
@@ -336,11 +373,13 @@ src/
 ├── producer.py            # Legacy Kafka producer
 ├── consumer.py            # Legacy Kafka consumer
 ├── transformer.py         # Binary → JSON pipeline
+├── snews2_hopskotch_listener.py # Hopskotch -> GCN mock publisher
 ├── snews2_producer.py     # SNEWS2 Kafka producer + mock generators
 ├── snews2_consumer.py     # SNEWS2 Kafka consumer + pretty-print
 └── schemas/
     ├── legacy_snews.py    # Binary parser + bitflags
     ├── gcn_unified.py     # Legacy Pydantic JSON model
+    ├── snews2_gcn_schema.py # Custom SNEWS2 -> GCN envelope schema
     └── snews2_messages.py # SNEWS2 Pydantic models (5 tiers)
 tests/
 ├── test_transformer.py    # Legacy parser unit tests (13 tests)

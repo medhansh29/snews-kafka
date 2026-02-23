@@ -183,6 +183,32 @@ def cmd_snews2_transform(args):
     print(json.dumps(msg.to_json(), indent=2))
 
 
+def cmd_snews2_hopskotch_listen(args):
+    """Handle snews2-hopskotch-listen command to run snews_pt."""
+    import subprocess
+    import os
+    
+    plugin_path = os.path.join(os.path.dirname(__file__), "snews2_hopskotch_listener.py")
+    
+    cmd = ["snews_pt", "subscribe", "-p", plugin_path]
+    if args.no_firedrill:
+        cmd.append("--no-firedrill")
+    else:
+        cmd.append("--firedrill")
+        
+    print(f"Starting SNEWS_PT Hopskotch listener...")
+    print(f"Command: {' '.join(cmd)}")
+    print("-" * 60)
+    
+    try:
+        subprocess.run(cmd, check=True)
+    except KeyboardInterrupt:
+        print("\n\n✓ Listener stopped")
+    except Exception as e:
+        print(f"\nError running hopskotch listener: {e}")
+
+
+
 # ---------------------------------------------------------------------------
 # Main CLI
 # ---------------------------------------------------------------------------
@@ -243,6 +269,10 @@ Examples (SNEWS2):
                               choices=SNEWS2_TIERS, help="Message tier to display")
     s2_transform.add_argument("--test", action="store_true", help="Mark as TEST")
     s2_transform.set_defaults(func=cmd_snews2_transform)
+    
+    s2_listen = subparsers.add_parser("snews2-hopskotch-listen", help="Listen to Hopskotch and republish to Kafka")
+    s2_listen.add_argument("--no-firedrill", action="store_true", help="Listen to real hopskotch network instead of firedrill")
+    s2_listen.set_defaults(func=cmd_snews2_hopskotch_listen)
     
     args = parser.parse_args()
     setup_logging(args.verbose)

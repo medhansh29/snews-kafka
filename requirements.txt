@@ -12,4 +12,7 @@ pytest>=7.0
 pytest-asyncio>=0.21
 
 # Development
-python-dotenv>=1.0
+python-dotenv
+
+# SNEWS2 Pub-Sub
+snews_pt
